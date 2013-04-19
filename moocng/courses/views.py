@@ -28,6 +28,8 @@ from django.http import HttpResponseRedirect, HttpResponseForbidden
 from django.shortcuts import get_object_or_404, render_to_response
 from django.template import RequestContext
 from django.utils.translation import ugettext as _
+from django.utils.decorators import method_decorator
+from django.views.generic import View
 
 from moocng.badges.models import Award
 from moocng.courses.models import Course, CourseTeacher, Announcement
@@ -41,42 +43,57 @@ from moocng.courses.security import (check_user_can_view_course,
 from django.template.defaultfilters import slugify
 
 
-def home(request):
-    use_cache = True
-    if (request.user.is_superuser or request.user.is_staff or
-            CourseTeacher.objects.filter(teacher=request.user.id).exists()):
-        use_cache = False
-    courses = get_courses_available_for_user(request.user)
+class HomeView(View):
+    def get(self, request):
+        use_cache = True
+        if (request.user.is_superuser or request.user.is_staff or
+                CourseTeacher.objects.filter(teacher=request.user.id).exists()):
+            use_cache = False
+        courses = get_courses_available_for_user(request.user)
 
-    return render_to_response('courses/home.html', {
-        'courses': courses,
-        'use_cache': use_cache,
-    }, context_instance=RequestContext(request))
-
-
-def flatpage(request, page=""):
-    # Translate flatpages
-    lang = request.LANGUAGE_CODE.lower()
-    fpage = get_object_or_404(FlatPage, url__exact=("/%s-%s/" % (page, lang)),
-                              sites__id__exact=settings.SITE_ID)
-    return render_flatpage(request, fpage)
+        return render_to_response('courses/home.html', {
+            'courses': courses,
+            'use_cache': use_cache,
+        }, context_instance=RequestContext(request))
 
 
-name_and_id_regex = re.compile('[^\(]+\((\d+)\)')
+class FlatPageView(View):
+    def get(self, request, page=""):
+        # Translate flatpages
+        lang = request.LANGUAGE_CODE.lower()
+        fpage = get_object_or_404(FlatPage, url__exact=("/%s-%s/" % (page, lang)),
+                                  sites__id__exact=settings.SITE_ID)
+        return render_flatpage(request, fpage)
 
 
-@login_required
-def course_add(request):
-    allow_public = False
-    try:
-        allow_public = settings.ALLOW_PUBLIC_COURSE_CREATION
-    except AttributeError:
-        pass
+class CourseAddView(View):
+    name_and_id_regex = re.compile('[^\(]+\((\d+)\)')
 
-    if not allow_public and not request.user.is_staff:
-        return HttpResponseForbidden(_("Only administrators can create courses"))
+    @method_decorator(login_required)
+    def get(self, request):
+        allow_public = False
+        try:
+            allow_public = settings.ALLOW_PUBLIC_COURSE_CREATION
+        except AttributeError:
+            pass
 
-    if request.method == 'POST':
+        if not allow_public and not request.user.is_staff:
+            return HttpResponseForbidden(_("Only administrators can create courses"))
+
+        return render_to_response('courses/add.html', {},
+                                  context_instance=RequestContext(request))
+
+    @method_decorator(login_required)
+    def post(self, request):
+        allow_public = False
+        try:
+            allow_public = settings.ALLOW_PUBLIC_COURSE_CREATION
+        except AttributeError:
+            pass
+
+        if not allow_public and not request.user.is_staff:
+            return HttpResponseForbidden(_("Only administrators can create courses"))
+
         if 'course_owner' in request.POST:
             email_or_id = request.POST['course_owner']
             try:
@@ -89,7 +106,7 @@ def course_add(request):
                     return HttpResponseRedirect(reverse('course_add'))
             except ValidationError:
                 # is name plus id
-                owner_id = name_and_id_regex.search(email_or_id)
+                owner_id = self.name_and_id_regex.search(email_or_id)
                 if owner_id is None:
                     messages.error(request, _('The owner must be a name plus ID or an email'))
                     return HttpResponseRedirect(reverse('course_add'))
@@ -127,169 +144,171 @@ def course_add(request):
         messages.success(request, _('The course was successfully created'))
         return HttpResponseRedirect(reverse('teacheradmin_info', args=[course.slug]))
 
-    return render_to_response('courses/add.html', {},
-                              context_instance=RequestContext(request))
 
+class CourseOverviewView(View):
+    def get(self, request, course_slug):
+        course = get_object_or_404(Course, slug=course_slug)
 
-def course_overview(request, course_slug):
-    course = get_object_or_404(Course, slug=course_slug)
+        check_user_can_view_course(course, request)
 
-    check_user_can_view_course(course, request)
+        if request.user.is_authenticated():
+            is_enrolled = course.students.filter(id=request.user.id).exists()
+            is_teacher = is_teacher_test(request.user, course)
+        else:
+            is_enrolled = False
+            is_teacher = False
 
-    if request.user.is_authenticated():
-        is_enrolled = course.students.filter(id=request.user.id).exists()
-        is_teacher = is_teacher_test(request.user, course)
-    else:
-        is_enrolled = False
-        is_teacher = False
+        course_teachers = CourseTeacher.objects.filter(course=course)
+        announcements = Announcement.objects.filter(course=course).order_by('datetime').reverse()[:5]
+        units = get_units_available_for_user(course, request.user, True)
+        use_old_calculus = course.slug in settings.COURSES_USING_OLD_TRANSCRIPT
 
-    course_teachers = CourseTeacher.objects.filter(course=course)
-    announcements = Announcement.objects.filter(course=course).order_by('datetime').reverse()[:5]
-    units = get_units_available_for_user(course, request.user, True)
-    use_old_calculus = course.slug in settings.COURSES_USING_OLD_TRANSCRIPT
-
-    return render_to_response('courses/overview.html', {
-        'course': course,
-        'units': units,
-        'is_enrolled': is_enrolled,
-        'is_teacher': is_teacher,
-        'request': request,
-        'course_teachers': course_teachers,
-        'announcements': announcements,
-        'use_old_calculus': use_old_calculus,
-    }, context_instance=RequestContext(request))
-
-
-@login_required
-def course_classroom(request, course_slug):
-    course = get_object_or_404(Course, slug=course_slug)
-
-    is_enrolled = course.students.filter(id=request.user.id).exists()
-    if not is_enrolled:
-        messages.error(request, _('You are not enrolled in this course'))
-        return HttpResponseRedirect(reverse('course_overview', args=[course_slug]))
-
-    is_ready, ask_admin = is_course_ready(course)
-
-    if not is_ready:
-        return render_to_response('courses/no_content.html', {
+        return render_to_response('courses/overview.html', {
             'course': course,
+            'units': units,
             'is_enrolled': is_enrolled,
-            'ask_admin': ask_admin,
-        }, context_instance=RequestContext(request))
-
-    units = []
-    for u in get_units_available_for_user(course, request.user):
-        unit = {
-            'id': u.id,
-            'title': u.title,
-            'unittype': u.unittype,
-            'badge_class': get_unit_badge_class(u),
-            'badge_tooltip': u.get_unit_type_name(),
-        }
-        units.append(unit)
-
-    peer_review = {
-        'text_max_size': settings.PEER_REVIEW_TEXT_MAX_SIZE,
-        'file_max_size': settings.PEER_REVIEW_FILE_MAX_SIZE,
-    }
-
-    return render_to_response('courses/classroom.html', {
-        'course': course,
-        'unit_list': units,
-        'is_enrolled': is_enrolled,
-        'is_teacher': is_teacher_test(request.user, course),
-        'peer_review': peer_review
-    }, context_instance=RequestContext(request))
-
-
-@login_required
-def course_progress(request, course_slug):
-    course = get_object_or_404(Course, slug=course_slug)
-
-    is_enrolled = course.students.filter(id=request.user.id).exists()
-    if not is_enrolled:
-        messages.error(request, _('You are not enrolled in this course'))
-        return HttpResponseRedirect(reverse('course_overview', args=[course_slug]))
-
-    is_ready, ask_admin = is_course_ready(course)
-
-    if not is_ready:
-        return render_to_response('courses/no_content.html', {
-            'course': course,
-            'is_enrolled': is_enrolled,
-            'ask_admin': ask_admin,
-        }, context_instance=RequestContext(request))
-
-    units = []
-    for u in get_units_available_for_user(course, request.user):
-        unit = {
-            'id': u.id,
-            'title': u.title,
-            'unittype': u.unittype,
-            'badge_class': get_unit_badge_class(u),
-            'badge_tooltip': u.get_unit_type_name(),
-        }
-        units.append(unit)
-
-    return render_to_response('courses/progress.html', {
-        'course': course,
-        'unit_list': units,
-        'is_enrolled': is_enrolled,  # required due course nav templatetag
-        'is_teacher': is_teacher_test(request.user, course),
-    }, context_instance=RequestContext(request))
-
-
-def announcement_detail(request, course_slug, announcement_id, announcement_slug):
-    course = get_object_or_404(Course, slug=course_slug)
-    announcement = get_object_or_404(Announcement, id=announcement_id)
-
-    return render_to_response('courses/announcement.html', {
-        'course': course,
-        'announcement': announcement,
-    }, context_instance=RequestContext(request))
-
-
-@login_required
-def transcript(request):
-    course_list = request.user.courses_as_student.all()
-    courses_info = []
-    cert_url = ''
-    for course in course_list:
-        use_old_calculus = False
-        if course.slug in settings.COURSES_USING_OLD_TRANSCRIPT:
-            use_old_calculus = True
-        total_mark, units_info = calculate_course_mark(course, request.user)
-        award = None
-        passed = False
-        if course.threshold is not None and float(course.threshold) <= total_mark:
-            passed = True
-            cert_url = settings.CERTIFICATE_URL % {
-                'courseid': course.id,
-                'email': request.user.email.lower()
-            }
-            badge = course.completion_badge
-            if badge is not None:
-                try:
-                    award = Award.objects.get(badge=badge, user=request.user)
-                except Award.DoesNotExist:
-                    award = Award(badge=badge, user=request.user)
-                    award.save()
-        for idx, uinfo in enumerate(units_info):
-            unit_class = get_unit_badge_class(uinfo['unit'])
-            units_info[idx]['badge_class'] = unit_class
-            if (not use_old_calculus and uinfo['unit'].unittype == 'n') or \
-                    not units_info[idx]['use_unit_in_total']:
-                units_info[idx]['hide'] = True
-        courses_info.append({
-            'course': course,
-            'units_info': units_info,
-            'mark': total_mark,
-            'award': award,
-            'passed': passed,
-            'cert_url': cert_url,
+            'is_teacher': is_teacher,
+            'request': request,
+            'course_teachers': course_teachers,
+            'announcements': announcements,
             'use_old_calculus': use_old_calculus,
-        })
-    return render_to_response('courses/transcript.html', {
-        'courses_info': courses_info,
-    }, context_instance=RequestContext(request))
+        }, context_instance=RequestContext(request))
+
+
+class CourseClassroomView(View):
+    @method_decorator(login_required)
+    def get(self, request, course_slug):
+        course = get_object_or_404(Course, slug=course_slug)
+
+        is_enrolled = course.students.filter(id=request.user.id).exists()
+        if not is_enrolled:
+            messages.error(request, _('You are not enrolled in this course'))
+            return HttpResponseRedirect(reverse('course_overview', args=[course_slug]))
+
+        is_ready, ask_admin = is_course_ready(course)
+
+        if not is_ready:
+            return render_to_response('courses/no_content.html', {
+                'course': course,
+                'is_enrolled': is_enrolled,
+                'ask_admin': ask_admin,
+            }, context_instance=RequestContext(request))
+
+        units = []
+        for u in get_units_available_for_user(course, request.user):
+            unit = {
+                'id': u.id,
+                'title': u.title,
+                'unittype': u.unittype,
+                'badge_class': get_unit_badge_class(u),
+                'badge_tooltip': u.get_unit_type_name(),
+            }
+            units.append(unit)
+
+        peer_review = {
+            'text_max_size': settings.PEER_REVIEW_TEXT_MAX_SIZE,
+            'file_max_size': settings.PEER_REVIEW_FILE_MAX_SIZE,
+        }
+
+        return render_to_response('courses/classroom.html', {
+            'course': course,
+            'unit_list': units,
+            'is_enrolled': is_enrolled,
+            'is_teacher': is_teacher_test(request.user, course),
+            'peer_review': peer_review
+        }, context_instance=RequestContext(request))
+
+
+class CourseProgressView(View):
+    @method_decorator(login_required)
+    def get(self, request, course_slug):
+        course = get_object_or_404(Course, slug=course_slug)
+
+        is_enrolled = course.students.filter(id=request.user.id).exists()
+        if not is_enrolled:
+            messages.error(request, _('You are not enrolled in this course'))
+            return HttpResponseRedirect(reverse('course_overview', args=[course_slug]))
+
+        is_ready, ask_admin = is_course_ready(course)
+
+        if not is_ready:
+            return render_to_response('courses/no_content.html', {
+                'course': course,
+                'is_enrolled': is_enrolled,
+                'ask_admin': ask_admin,
+            }, context_instance=RequestContext(request))
+
+        units = []
+        for u in get_units_available_for_user(course, request.user):
+            unit = {
+                'id': u.id,
+                'title': u.title,
+                'unittype': u.unittype,
+                'badge_class': get_unit_badge_class(u),
+                'badge_tooltip': u.get_unit_type_name(),
+            }
+            units.append(unit)
+
+        return render_to_response('courses/progress.html', {
+            'course': course,
+            'unit_list': units,
+            'is_enrolled': is_enrolled,  # required due course nav templatetag
+            'is_teacher': is_teacher_test(request.user, course),
+        }, context_instance=RequestContext(request))
+
+
+class AnnouncementDetailView(View):
+    def get(self, request, course_slug, announcement_id, announcement_slug):
+        course = get_object_or_404(Course, slug=course_slug)
+        announcement = get_object_or_404(Announcement, id=announcement_id)
+
+        return render_to_response('courses/announcement.html', {
+            'course': course,
+            'announcement': announcement,
+        }, context_instance=RequestContext(request))
+
+
+class TranscriptView(View):
+    @method_decorator(login_required)
+    def get(self, request):
+        course_list = request.user.courses_as_student.all()
+        courses_info = []
+        cert_url = ''
+        for course in course_list:
+            use_old_calculus = False
+            if course.slug in settings.COURSES_USING_OLD_TRANSCRIPT:
+                use_old_calculus = True
+            total_mark, units_info = calculate_course_mark(course, request.user)
+            award = None
+            passed = False
+            if course.threshold is not None and float(course.threshold) <= total_mark:
+                passed = True
+                cert_url = settings.CERTIFICATE_URL % {
+                    'courseid': course.id,
+                    'email': request.user.email.lower()
+                }
+                badge = course.completion_badge
+                if badge is not None:
+                    try:
+                        award = Award.objects.get(badge=badge, user=request.user)
+                    except Award.DoesNotExist:
+                        award = Award(badge=badge, user=request.user)
+                        award.save()
+            for idx, uinfo in enumerate(units_info):
+                unit_class = get_unit_badge_class(uinfo['unit'])
+                units_info[idx]['badge_class'] = unit_class
+                if (not use_old_calculus and uinfo['unit'].unittype == 'n') or \
+                        not units_info[idx]['use_unit_in_total']:
+                    units_info[idx]['hide'] = True
+            courses_info.append({
+                'course': course,
+                'units_info': units_info,
+                'mark': total_mark,
+                'award': award,
+                'passed': passed,
+                'cert_url': cert_url,
+                'use_old_calculus': use_old_calculus,
+            })
+        return render_to_response('courses/transcript.html', {
+            'courses_info': courses_info,
+        }, context_instance=RequestContext(request))

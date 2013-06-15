@@ -20,6 +20,8 @@ from django.http import HttpResponseRedirect, HttpResponseForbidden, HttpRespons
 from django.shortcuts import get_object_or_404, render_to_response
 from django.template import RequestContext
 from django.utils.translation import ugettext as _
+from django.utils.decorators import method_decorator
+from django.views.generic import View
 
 
 from moocng.assets.models import Asset, AssetAvailability, Reservation
@@ -33,63 +35,70 @@ from datetime import datetime, timedelta
 import pytz
 
 
-@login_required
-def course_reservations(request, course_slug):
-    course = get_object_or_404(Course, slug=course_slug)
+class CourseReservations(View):
+    def get(self, request, course_slug):
+        course = get_object_or_404(Course, slug=course_slug)
 
-    is_enrolled = course.students.filter(id=request.user.id).exists()
-    if not is_enrolled:
-        messages.error(request, _('You are not enrolled in this course'))
-        return HttpResponseRedirect(reverse('course_overview',
-                                            args=[course_slug]))
+        is_enrolled = course.students.filter(id=request.user.id).exists()
+        if not is_enrolled:
+            messages.error(request, _('You are not enrolled in this course'))
+            return HttpResponseRedirect(reverse('course_overview',
+                                                args=[course_slug]))
 
-    is_ready, ask_admin = is_course_ready(course)
+        is_ready, ask_admin = is_course_ready(course)
 
-    if not is_ready:
-        return render_to_response('courses/no_content.html', {
+        if not is_ready:
+            return render_to_response('courses/no_content.html', {
+                'course': course,
+                'is_enrolled': is_enrolled,
+                'ask_admin': ask_admin,
+            }, context_instance=RequestContext(request))
+
+        active_reservations = []
+        for i in user_course_get_active_reservations(request.user, course):
+            base = model_to_dict(i)
+            base['concurrent'] = get_concurrent_reservations(i)
+            base['asset'] = i.asset
+            base['reserved_from'] = i.reserved_from
+            active_reservations.append(base)
+
+        past_reservations = []
+        for i in user_course_get_past_reservations(request.user, course):
+            base = model_to_dict(i)
+            base['concurrent'] = get_concurrent_reservations(i)
+            base['asset'] = i.asset
+            base['reserved_from'] = i.reserved_from
+            past_reservations.append(base)
+
+        pending_reservations = []
+        for i in user_course_get_pending_reservations(request.user, course):
+            base = model_to_dict(i)
+            base['concurrent'] = get_concurrent_reservations(i)
+            base['asset'] = i.asset
+            base['reserved_from'] = i.reserved_from
+            pending_reservations.append(base)
+
+        return render_to_response('assets/reservations.html', {
             'course': course,
             'is_enrolled': is_enrolled,
-            'ask_admin': ask_admin,
+            'active_reservations': active_reservations,
+            'past_reservations': past_reservations,
+            'pending_reservations': pending_reservations,
         }, context_instance=RequestContext(request))
 
-    active_reservations = []
-    for i in user_course_get_active_reservations(request.user, course):
-        base = model_to_dict(i)
-        base['concurrent'] = get_concurrent_reservations(i)
-        base['asset'] = i.asset
-        base['reserved_from'] = i.reserved_from
-        active_reservations.append(base)
-
-    past_reservations = []
-    for i in user_course_get_past_reservations(request.user, course):
-        base = model_to_dict(i)
-        base['concurrent'] = get_concurrent_reservations(i)
-        base['asset'] = i.asset
-        base['reserved_from'] = i.reserved_from
-        past_reservations.append(base)
-
-    pending_reservations = []
-    for i in user_course_get_pending_reservations(request.user, course):
-        base = model_to_dict(i)
-        base['concurrent'] = get_concurrent_reservations(i)
-        base['asset'] = i.asset
-        base['reserved_from'] = i.reserved_from
-        pending_reservations.append(base)
-
-    return render_to_response('assets/reservations.html', {
-        'course': course,
-        'is_enrolled': is_enrolled,
-        'active_reservations': active_reservations,
-        'past_reservations': past_reservations,
-        'pending_reservations': pending_reservations,
-    }, context_instance=RequestContext(request))
+    @method_decorator(login_required)
+    def dispatch(self, *args, **kwargs):
+        return super(CourseReservations, self).dispatch(*args, **kwargs)
 
 
-@login_required
-def cancel_reservation(request, course_slug, reservation_id):
+class CancelReservation(View):
+    def post(self, request, course_slug, reservation_id):
+        return self.post_and_delete(request, course_slug, reservation_id)
 
-    if request.method in ['POST', 'DELETE']:
+    def delete(self, request, course_slug, reservation_id):
+        return self.post_and_delete(request, course_slug, reservation_id)
 
+    def post_and_delete(self, request, course_slug, reservation_id):
         course = get_object_or_404(Course, slug=course_slug)
 
         is_enrolled = course.students.filter(id=request.user.id).exists()
@@ -115,14 +124,19 @@ def cancel_reservation(request, course_slug, reservation_id):
 
         return HttpResponseRedirect(reverse('course_reservations', args=[course.slug]))
 
-    else:
-        return HttpResponseNotAllowed(['POST', 'DELETE'])
+    @method_decorator(login_required)
+    def dispatch(self, *args, **kwargs):
+        return super(CancelReservation, self).dispatch(*args, **kwargs)
 
 
-@login_required
-def reservation_create(request, course_slug, kq_id, asset_id):
+class ReservationCreate(View):
+    def post(self, request, course_slug, kq_id, asset_id):
+        return self.post_and_put(request, course_slug, kq_id, asset_id)
 
-    if request.method in ['POST', 'PUT']:
+    def put(self, request, course_slug, kq_id, asset_id):
+        return self.post_and_put(request, course_slug, kq_id, asset_id)
+
+    def post_and_put(self, request, course_slug, kq_id, asset_id):
         course = get_object_or_404(Course, slug=course_slug)
         is_enrolled = course.students.filter(id=request.user.id).exists()
 
@@ -163,5 +177,7 @@ def reservation_create(request, course_slug, kq_id, asset_id):
 
         return HttpResponseRedirect(reverse('course_reservations',
                                     args=[course_slug]))
-    else:
-        return HttpResponseNotAllowed(['POST', 'PUT'])
+
+    @method_decorator(login_required)
+    def dispatch(self, *args, **kwargs):
+        return super(ReservationCreate, self).dispatch(*args, **kwargs)

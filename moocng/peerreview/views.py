@@ -30,6 +30,8 @@ from django.http import HttpResponseRedirect, HttpResponse
 from django.shortcuts import get_object_or_404, render_to_response
 from django.template import RequestContext
 from django.utils.translation import ugettext as _
+from django.utils.decorators import method_decorator
+from django.views.generic import View
 
 from moocng.api.mongodb import get_db
 from moocng.api.tasks import on_peerreviewreview_created_task
@@ -40,148 +42,216 @@ from moocng.peerreview.models import PeerReviewAssignment, EvaluationCriterion
 from moocng.peerreview.utils import course_get_visible_peer_review_assignments, save_review
 
 
-@login_required
-def course_review_assign(request, course_slug, assignment_id):
-    course = get_object_or_404(Course, slug=course_slug)
-    assignment = get_object_or_404(PeerReviewAssignment, id=assignment_id)
-    user_id = request.user.id
+class CourseReviewAssign(View):
+    def get(self, request, course_slug, assignment_id):
+        return self.get_and_post(request, course_slug, assignment_id)
 
-    is_enrolled = course.students.filter(id=user_id).exists()
-    if not is_enrolled:
-        messages.error(request, _('You are not enrolled in this course'))
-        return HttpResponseRedirect(reverse('course_overview', args=[course_slug]))
+    def post(self, request, course_slug, assignment_id):
+        return self.get_and_post(request, course_slug, assignment_id)
 
-    if assignment.kq.unit.course != course:
-        messages.error(request, _('The selected peer review assignment is not part of this course.'))
-        return HttpResponseRedirect(reverse('course_reviews', args=[course_slug]))
+    def get_and_post(self, request, course_slug, assignment_id):
+        course = get_object_or_404(Course, slug=course_slug)
+        assignment = get_object_or_404(PeerReviewAssignment, id=assignment_id)
+        user_id = request.user.id
 
-    collection = get_db().get_collection('peer_review_submissions')
+        is_enrolled = course.students.filter(id=user_id).exists()
+        if not is_enrolled:
+            messages.error(request, _('You are not enrolled in this course'))
+            return HttpResponseRedirect(reverse('course_overview', args=[course_slug]))
 
-    submission = collection.find({
-        'kq': assignment.kq.id,
-        'assigned_to': user_id
-    })
-    if submission.count() > 0:
-        messages.error(request, _('You already have a submission assigned.'))
-        return HttpResponseRedirect(reverse('course_reviews', args=[course_slug]))
+        if assignment.kq.unit.course != course:
+            messages.error(request, _('The selected peer review assignment is not part of this course.'))
+            return HttpResponseRedirect(reverse('course_reviews', args=[course_slug]))
 
-    max_hours_assigned = timedelta(hours=getattr(settings,
-                                   "PEER_REVIEW_ASSIGNATION_EXPIRE", 24))
+        collection = get_db().get_collection('peer_review_submissions')
 
-    assignation_expire = datetime.utcnow() - max_hours_assigned
-
-    submission = collection.find({
-        'kq': assignment.kq.id,
-        '$or': [
-            {
-                'assigned_to': {
-                    '$exists': False
-                },
-            },
-            {
-                'assigned_when': {
-                    '$lt': assignation_expire
-                },
-            }
-        ],
-        'author': {
-            '$ne': user_id
-        },
-        'reviewers': {
-            '$ne': user_id
-        }
-    }).sort([
-        ('reviews', pymongo.ASCENDING),
-        ('author_reviews', pymongo.DESCENDING),
-    ]).limit(1)
-
-    if submission.count() == 0:
-        messages.error(request, _('There is no submission avaliable for you at this moment. Please, try again later.'))
-        return HttpResponseRedirect(reverse('course_reviews', args=[course_slug]))
-    else:
-        collection.update({
-            '_id': submission[0]['_id']
-        }, {
-            '$set': {
-                'assigned_to': user_id,
-                'assigned_when': datetime.utcnow()
-            }
+        submission = collection.find({
+            'kq': assignment.kq.id,
+            'assigned_to': user_id
         })
-        return HttpResponseRedirect(reverse('course_review_review', args=[course_slug, assignment_id]))
+        if submission.count() > 0:
+            messages.error(request, _('You already have a submission assigned.'))
+            return HttpResponseRedirect(reverse('course_reviews', args=[course_slug]))
+
+        max_hours_assigned = timedelta(hours=getattr(settings,
+                                       "PEER_REVIEW_ASSIGNATION_EXPIRE", 24))
+
+        assignation_expire = datetime.utcnow() - max_hours_assigned
+
+        submission = collection.find({
+            'kq': assignment.kq.id,
+            '$or': [
+                {
+                    'assigned_to': {
+                        '$exists': False
+                    },
+                },
+                {
+                    'assigned_when': {
+                        '$lt': assignation_expire
+                    },
+                }
+            ],
+            'author': {
+                '$ne': user_id
+            },
+            'reviewers': {
+                '$ne': user_id
+            }
+        }).sort([
+            ('reviews', pymongo.ASCENDING),
+            ('author_reviews', pymongo.DESCENDING),
+        ]).limit(1)
+
+        if submission.count() == 0:
+            messages.error(request, _('There is no submission avaliable for you at this moment. Please, try again later.'))
+            return HttpResponseRedirect(reverse('course_reviews', args=[course_slug]))
+        else:
+            collection.update({
+                '_id': submission[0]['_id']
+            }, {
+                '$set': {
+                    'assigned_to': user_id,
+                    'assigned_when': datetime.utcnow()
+                }
+            })
+            return HttpResponseRedirect(reverse('course_review_review', args=[course_slug, assignment_id]))
+
+    @method_decorator(login_required)
+    def dispatch(self, *args, **kwargs):
+        return super(CourseReviewAssign, self).dispatch(*args, **kwargs)
 
 
-@login_required
-def course_reviews(request, course_slug):
-    course = get_object_or_404(Course, slug=course_slug)
+class CourseReview(View):
+    def get(self, request, course_slug):
+        course = get_object_or_404(Course, slug=course_slug)
 
-    is_enrolled = course.students.filter(id=request.user.id).exists()
-    if not is_enrolled:
-        messages.error(request, _('You are not enrolled in this course'))
-        return HttpResponseRedirect(reverse('course_overview', args=[course_slug]))
+        is_enrolled = course.students.filter(id=request.user.id).exists()
+        if not is_enrolled:
+            messages.error(request, _('You are not enrolled in this course'))
+            return HttpResponseRedirect(reverse('course_overview', args=[course_slug]))
 
-    is_ready, ask_admin = is_course_ready(course)
+        is_ready, ask_admin = is_course_ready(course)
 
-    if not is_ready:
-        return render_to_response('courses/no_content.html', {
+        if not is_ready:
+            return render_to_response('courses/no_content.html', {
+                'course': course,
+                'is_enrolled': is_enrolled,
+                'ask_admin': ask_admin,
+            }, context_instance=RequestContext(request))
+
+        assignments = course_get_visible_peer_review_assignments(request.user,
+                                                                 course)
+
+        collection = get_db().get_collection('peer_review_submissions')
+        submissions = collection.find({
+            'author': request.user.id,
+            'course': course.id,
+        }, {'kq': True, '_id': False})
+        submissions = [s['kq'] for s in submissions]
+
+        user_submissions = [a.id for a in assignments if a.kq.id in submissions]
+
+        return render_to_response('peerreview/reviews.html', {
             'course': course,
+            'assignments': assignments,
+            'user_submissions': user_submissions,
             'is_enrolled': is_enrolled,
-            'ask_admin': ask_admin,
         }, context_instance=RequestContext(request))
 
-    assignments = course_get_visible_peer_review_assignments(request.user,
-                                                             course)
+    @method_decorator(login_required)
+    def dispatch(self, *args, **kwargs):
+        return super(CourseReview, self).dispatch(*args, **kwargs)
 
-    collection = get_db().get_collection('peer_review_submissions')
-    submissions = collection.find({
-        'author': request.user.id,
-        'course': course.id,
-    }, {'kq': True, '_id': False})
-    submissions = [s['kq'] for s in submissions]
+# TODO: Need refactor, a lot of duplication code between post and get
+class CourseReviewReview(View):
+    def get(self, request, course_slug, assignment_id):
+        course = get_object_or_404(Course, slug=course_slug)
+        assignment = get_object_or_404(PeerReviewAssignment, id=assignment_id)
+        user_id = request.user.id
 
-    user_submissions = [a.id for a in assignments if a.kq.id in submissions]
+        is_enrolled = course.students.filter(id=user_id).exists()
+        if not is_enrolled:
+            messages.error(request, _('You are not enrolled in this course'))
+            return HttpResponseRedirect(reverse('course_overview', args=[course_slug]))
 
-    return render_to_response('peerreview/reviews.html', {
-        'course': course,
-        'assignments': assignments,
-        'user_submissions': user_submissions,
-        'is_enrolled': is_enrolled,
-    }, context_instance=RequestContext(request))
+        if assignment.kq.unit.course != course:
+            messages.error(request, _('The selected peer review assignment is not part of this course.'))
+            return HttpResponseRedirect(reverse('course_reviews', args=[course_slug]))
 
+        collection = get_db().get_collection('peer_review_submissions')
 
-@login_required
-def course_review_review(request, course_slug, assignment_id):
-    course = get_object_or_404(Course, slug=course_slug)
-    assignment = get_object_or_404(PeerReviewAssignment, id=assignment_id)
-    user_id = request.user.id
+        submission = collection.find({
+            'kq': assignment.kq.id,
+            'assigned_to': user_id
+        })
 
-    is_enrolled = course.students.filter(id=user_id).exists()
-    if not is_enrolled:
-        messages.error(request, _('You are not enrolled in this course'))
-        return HttpResponseRedirect(reverse('course_overview', args=[course_slug]))
+        if submission.count() == 0:
+            messages.error(request, _('You don\'t have this submission assigned.'))
+            return HttpResponseRedirect(reverse('course_reviews', args=[course_slug]))
 
-    if assignment.kq.unit.course != course:
-        messages.error(request, _('The selected peer review assignment is not part of this course.'))
-        return HttpResponseRedirect(reverse('course_reviews', args=[course_slug]))
+        submission_obj = submission[0]
 
-    collection = get_db().get_collection('peer_review_submissions')
+        submitter = User.objects.get(id=int(submission_obj['author']))
 
-    submission = collection.find({
-        'kq': assignment.kq.id,
-        'assigned_to': user_id
-    })
+        criteria_initial = [{'evaluation_criterion_id': criterion.id} for criterion in assignment.criteria.all()]
+        EvalutionCriteriaResponseFormSet = formset_factory(EvalutionCriteriaResponseForm, extra=0, max_num=len(criteria_initial))
 
-    if submission.count() == 0:
-        messages.error(request, _('You don\'t have this submission assigned.'))
-        return HttpResponseRedirect(reverse('course_reviews', args=[course_slug]))
+        submission_form = ReviewSubmissionForm()
+        criteria_formset = EvalutionCriteriaResponseFormSet(initial=criteria_initial)
 
-    submission_obj = submission[0]
+        max_hours_assigned = timedelta(hours=getattr(settings,
+                                       "PEER_REVIEW_ASSIGNATION_EXPIRE", 24))
 
-    submitter = User.objects.get(id=int(submission_obj['author']))
+        assigned_when = submission[0]["assigned_when"]
+        assignation_expire = assigned_when + max_hours_assigned
 
-    criteria_initial = [{'evaluation_criterion_id': criterion.id} for criterion in assignment.criteria.all()]
-    EvalutionCriteriaResponseFormSet = formset_factory(EvalutionCriteriaResponseForm, extra=0, max_num=len(criteria_initial))
+        now = datetime.now(assigned_when.tzinfo)
+        is_assignation_expired = now > assignation_expire
 
-    if request.method == "POST":
+        return render_to_response('peerreview/review_review.html', {
+            'submission': submission[0],
+            'is_assignation_expired': is_assignation_expired,
+            'assignation_expire': assignation_expire,
+            'submission_form': submission_form,
+            'criteria_formset': criteria_formset,
+            'course': course,
+            'assignment': assignment,
+            'is_enrolled': is_enrolled,
+        }, context_instance=RequestContext(request))
+
+    def post(self, request, course_slug, assignment_id):
+        course = get_object_or_404(Course, slug=course_slug)
+        assignment = get_object_or_404(PeerReviewAssignment, id=assignment_id)
+        user_id = request.user.id
+
+        is_enrolled = course.students.filter(id=user_id).exists()
+        if not is_enrolled:
+            messages.error(request, _('You are not enrolled in this course'))
+            return HttpResponseRedirect(reverse('course_overview', args=[course_slug]))
+
+        if assignment.kq.unit.course != course:
+            messages.error(request, _('The selected peer review assignment is not part of this course.'))
+            return HttpResponseRedirect(reverse('course_reviews', args=[course_slug]))
+
+        collection = get_db().get_collection('peer_review_submissions')
+
+        submission = collection.find({
+            'kq': assignment.kq.id,
+            'assigned_to': user_id
+        })
+
+        if submission.count() == 0:
+            messages.error(request, _('You don\'t have this submission assigned.'))
+            return HttpResponseRedirect(reverse('course_reviews', args=[course_slug]))
+
+        submission_obj = submission[0]
+
+        submitter = User.objects.get(id=int(submission_obj['author']))
+
+        criteria_initial = [{'evaluation_criterion_id': criterion.id} for criterion in assignment.criteria.all()]
+        EvalutionCriteriaResponseFormSet = formset_factory(EvalutionCriteriaResponseForm, extra=0, max_num=len(criteria_initial))
+
         submission_form = ReviewSubmissionForm(request.POST)
         criteria_formset = EvalutionCriteriaResponseFormSet(request.POST, initial=criteria_initial)
         if criteria_formset.is_valid() and submission_form.is_valid():
@@ -211,29 +281,30 @@ def course_review_review(request, course_slug, assignment_id):
             else:
                 messages.success(request, _('Your review has been submitted.'))
             return HttpResponseRedirect(reverse('course_reviews', args=[course_slug]))
-    else:
-        submission_form = ReviewSubmissionForm()
-        criteria_formset = EvalutionCriteriaResponseFormSet(initial=criteria_initial)
 
-    max_hours_assigned = timedelta(hours=getattr(settings,
-                                   "PEER_REVIEW_ASSIGNATION_EXPIRE", 24))
+        max_hours_assigned = timedelta(hours=getattr(settings,
+                                       "PEER_REVIEW_ASSIGNATION_EXPIRE", 24))
 
-    assigned_when = submission[0]["assigned_when"]
-    assignation_expire = assigned_when + max_hours_assigned
+        assigned_when = submission[0]["assigned_when"]
+        assignation_expire = assigned_when + max_hours_assigned
 
-    now = datetime.now(assigned_when.tzinfo)
-    is_assignation_expired = now > assignation_expire
+        now = datetime.now(assigned_when.tzinfo)
+        is_assignation_expired = now > assignation_expire
 
-    return render_to_response('peerreview/review_review.html', {
-        'submission': submission[0],
-        'is_assignation_expired': is_assignation_expired,
-        'assignation_expire': assignation_expire,
-        'submission_form': submission_form,
-        'criteria_formset': criteria_formset,
-        'course': course,
-        'assignment': assignment,
-        'is_enrolled': is_enrolled,
-    }, context_instance=RequestContext(request))
+        return render_to_response('peerreview/review_review.html', {
+            'submission': submission[0],
+            'is_assignation_expired': is_assignation_expired,
+            'assignation_expire': assignation_expire,
+            'submission_form': submission_form,
+            'criteria_formset': criteria_formset,
+            'course': course,
+            'assignment': assignment,
+            'is_enrolled': is_enrolled,
+        }, context_instance=RequestContext(request))
+
+    @method_decorator(login_required)
+    def dispatch(self, *args, **kwargs):
+        return super(CourseReviewReview, self).dispatch(*args, **kwargs)
 
 
 def send_mail_to_submission_owner(current_site_name, assignment, review, submitter):
@@ -261,38 +332,46 @@ def send_mail_to_submission_owner(current_site_name, assignment, review, submitt
     send_mail_wrapper(subject, template, context, to)
 
 
-@login_required
-def get_s3_upload_url(request):
-    user = request.user
+class GetS3UploadUrl(View):
+    def get(self, request):
+        user = request.user
 
-    filename = request.GET.get('name', 'noname')
-    kq_id = request.GET.get('kq', 'nokq')
+        filename = request.GET.get('name', 'noname')
+        kq_id = request.GET.get('kq', 'nokq')
 
-    name = "%d/%s/%s" % (user.id, kq_id, filename)
-    mime_type = request.GET['type']
-    headers = {
-        'x-amz-acl': "public-read",
-        'Content-Type': mime_type,
-    }
+        name = "%d/%s/%s" % (user.id, kq_id, filename)
+        mime_type = request.GET['type']
+        headers = {
+            'x-amz-acl': "public-read",
+            'Content-Type': mime_type,
+        }
 
-    conn = boto.connect_s3(settings.AWS_ACCESS_KEY_ID, settings.AWS_SECRET_ACCESS_KEY)
-    url = conn.generate_url(
-        settings.AWS_S3_UPLOAD_EXPIRE_TIME,
-        "PUT",
-        settings.AWS_STORAGE_BUCKET_NAME,
-        name,
-        headers
-    )
+        conn = boto.connect_s3(settings.AWS_ACCESS_KEY_ID, settings.AWS_SECRET_ACCESS_KEY)
+        url = conn.generate_url(
+            settings.AWS_S3_UPLOAD_EXPIRE_TIME,
+            "PUT",
+            settings.AWS_STORAGE_BUCKET_NAME,
+            name,
+            headers
+        )
 
-    return HttpResponse(urllib.quote(url))
+        return HttpResponse(urllib.quote(url))
+
+    @method_decorator(login_required)
+    def dispatch(self, *args, **kwargs):
+        return super(GetS3UploadUrl, self).dispatch(*args, **kwargs)
 
 
-@login_required
-def get_s3_download_url(request):
-    name = request.GET.get('name', 'noname')
-    kq_id = request.GET.get('kq', 'nokq')
-    url = s3_url(request.user.id, name, kq_id)
-    return HttpResponse(urllib.quote(url))
+class GetS3DownloadUrl(View):
+    def get(self, request):
+        name = request.GET.get('name', 'noname')
+        kq_id = request.GET.get('kq', 'nokq')
+        url = s3_url(request.user.id, name, kq_id)
+        return HttpResponse(urllib.quote(url))
+
+    @method_decorator(login_required)
+    def dispatch(self, *args, **kwargs):
+        return super(GetS3DownloadUrl, self).dispatch(*args, **kwargs)
 
 
 def s3_url(user_id, filename, kq_id):
@@ -314,9 +393,8 @@ def s3_upload(user_id, kq_id, filename, file_obj):
     k.make_public()
 
 
-@login_required
-def course_review_upload(request, course_slug):
-    if request.method == "POST":
+class CourseReviewUpload(View):
+    def post(self, request, course_slug):
         course = get_object_or_404(Course, slug=course_slug)
 
         file_to_upload = request.FILES.get('pr_file', None)
@@ -354,3 +432,7 @@ def course_review_upload(request, course_slug):
         submissions.insert(submission)
 
         return HttpResponseRedirect(reverse('course_classroom', args=[course_slug]) + "#unit%d/kq%d/p" % (unit.id, kq.id))
+
+    @method_decorator(login_required)
+    def dispatch(self, *args, **kwargs):
+        return super(CourseReviewUpload, self).dispatch(*args, **kwargs)

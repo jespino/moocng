@@ -60,27 +60,27 @@ class TeacherAdminStats(TeacherAdminView):
         stats_course = get_db().get_collection('stats_course')
         stats = stats_course.find_one({'course_id': course.id})
 
-        if stats is not None:
-            data = {
-                'enrolled': course.students.count(),
-                'started': stats.get('started', -1),
-                'completed': stats.get('completed', -1),
-            }
-
-            if course.threshold is not None:
-                #if the course doesn't support certification, then don't return the
-                #'passed' stat since it doesn't apply
-                data['passed'] = stats.get('passed', -1)
-
-            return render_to_response('teacheradmin/stats.html', {
-                'course': course,
-                'is_enrolled': is_enrolled,
-                'initial_data': simplejson.dumps(data),
-            }, context_instance=RequestContext(request))
-        else:
+        if stats is None:
             messages.error(request, _(u"There are no statistics for this course."))
             return HttpResponseRedirect(reverse('teacheradmin_info',
                                                 args=[course_slug]))
+
+        data = {
+            'enrolled': course.students.count(),
+            'started': stats.get('started', -1),
+            'completed': stats.get('completed', -1),
+        }
+
+        if course.threshold is not None:
+            #if the course doesn't support certification, then don't return the
+            #'passed' stat since it doesn't apply
+            data['passed'] = stats.get('passed', -1)
+
+        return render_to_response('teacheradmin/stats.html', {
+            'course': course,
+            'is_enrolled': is_enrolled,
+            'initial_data': simplejson.dumps(data),
+        }, context_instance=RequestContext(request))
 
 
 class TeacherAdminStatsUnits(TeacherAdminView):
@@ -200,7 +200,6 @@ class TeacherAdminUnitsAttachment(TeacherAdminView):
         return HttpResponse()
 
 
-# TODO: Refactor some duplicated code in get a post
 class TeacherAdminUnitsQuestion(TeacherAdminView):
     def get(self, request, course_slug, kq_id):
         kq = get_object_or_404(KnowledgeQuantum, id=kq_id)
@@ -212,13 +211,7 @@ class TeacherAdminUnitsQuestion(TeacherAdminView):
         else:
             return HttpResponse(status=400)
 
-        if 'HTTP_REFERER' in request.META:
-            goback = request.META['HTTP_REFERER']
-        else:
-            goback = None
-
-        if obj is None:
-            raise Http404(_('The KQ with the %s id doesn\'t exists') % kq_id)
+        goback = request.META.get('HTTP_REFERER', None)
 
         json = [{
                 'id': opt.id,
@@ -241,21 +234,13 @@ class TeacherAdminUnitsQuestion(TeacherAdminView):
                                   context_instance=RequestContext(request))
     def post(self, request, course_slug, kq_id):
         kq = get_object_or_404(KnowledgeQuantum, id=kq_id)
-        course = get_object_or_404(Course, slug=course_slug)
-        is_enrolled = course.students.filter(id=request.user.id).exists()
         question_list = kq.question_set.all()
         if len(question_list) > 0:
             obj = question_list[0]
         else:
             return HttpResponse(status=400)
 
-        if 'HTTP_REFERER' in request.META:
-            goback = request.META['HTTP_REFERER']
-        else:
-            goback = None
-
-        if obj is None:
-            raise Http404(_('The KQ with the %s id doesn\'t exists') % kq_id)
+        goback = request.META.get('HTTP_REFERER', None)
 
         data = simplejson.loads(request.raw_post_data)
         option = obj.option_set.create(**data)
@@ -442,7 +427,6 @@ class TeacherAdminTeachersReorder(TeacherAdminView):
         return response
 
 
-# TODO: Refactor, some duplicated code in get and post
 class TeacherAdminInfo(TeacherAdminView):
     def get(self, request, course_slug):
         course = get_object_or_404(Course, slug=course_slug)
@@ -614,7 +598,6 @@ class TeacherAdminAnnouncementsView(TeacherAdminView):
         }, context_instance=RequestContext(request))
 
 
-# TODO: Refactor some duplicated code in get a post
 class TeacherAdminAnnouncementsAddOrEdit(TeacherAdminView):
     def get(self, request, course_slug, announ_id=None, announ_slug=None):
         if announ_id is None:

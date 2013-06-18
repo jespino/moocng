@@ -45,46 +45,69 @@ class CourseReservations(View):
             return HttpResponseRedirect(reverse('course_overview',
                                                 args=[course_slug]))
 
+        return render_to_response(
+            self.get_template_name(course),
+            self.get_context_data(request.user, course),
+            context_instance=RequestContext(request))
+
+    def get_template_name(self, course):
         is_ready, ask_admin = is_course_ready(course)
+        if is_ready:
+            return 'assets/reservations.html'
+        else:
+            return 'courses/no_content.html'
 
-        if not is_ready:
-            return render_to_response('courses/no_content.html', {
-                'course': course,
-                'is_enrolled': is_enrolled,
-                'ask_admin': ask_admin,
-            }, context_instance=RequestContext(request))
+    def get_context_data(self, user, course):
+        is_ready, ask_admin = is_course_ready(course)
+        is_enrolled = course.students.filter(id=user.id).exists()
 
+        context = {
+            "course": course,
+            "is_enrolled": is_enrolled,
+        }
+
+        if is_ready:
+            active_reservations = self.get_active_reservations(user, course)
+            past_reservations = self.get_past_reservations(user, course)
+            pending_reservations = self.get_pending_reservations(user, course)
+
+            context['active_reservations'] = active_reservations
+            context['past_reservations'] = past_reservations
+            context['pending_reservations'] = pending_reservations
+        else:
+            context['ask_admin'] = ask_admin
+
+        return context
+
+    def get_active_reservations(self, user, course):
         active_reservations = []
-        for i in user_course_get_active_reservations(request.user, course):
+        for i in user_course_get_active_reservations(user, course):
             base = model_to_dict(i)
             base['concurrent'] = get_concurrent_reservations(i)
             base['asset'] = i.asset
             base['reserved_from'] = i.reserved_from
             active_reservations.append(base)
+        return active_reservations
 
+    def get_past_reservations(self, user, course):
         past_reservations = []
-        for i in user_course_get_past_reservations(request.user, course):
+        for i in user_course_get_past_reservations(user, course):
             base = model_to_dict(i)
             base['concurrent'] = get_concurrent_reservations(i)
             base['asset'] = i.asset
             base['reserved_from'] = i.reserved_from
             past_reservations.append(base)
+        return past_reservations
 
+    def get_pending_reservations(self, user, course):
         pending_reservations = []
-        for i in user_course_get_pending_reservations(request.user, course):
+        for i in user_course_get_pending_reservations(user, course):
             base = model_to_dict(i)
             base['concurrent'] = get_concurrent_reservations(i)
             base['asset'] = i.asset
             base['reserved_from'] = i.reserved_from
             pending_reservations.append(base)
-
-        return render_to_response('assets/reservations.html', {
-            'course': course,
-            'is_enrolled': is_enrolled,
-            'active_reservations': active_reservations,
-            'past_reservations': past_reservations,
-            'pending_reservations': pending_reservations,
-        }, context_instance=RequestContext(request))
+        return pending_reservations
 
     @method_decorator(login_required)
     def dispatch(self, *args, **kwargs):

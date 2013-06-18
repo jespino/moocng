@@ -52,9 +52,8 @@ class CourseReviewAssign(View):
     def get_and_post(self, request, course_slug, assignment_id):
         course = get_object_or_404(Course, slug=course_slug)
         assignment = get_object_or_404(PeerReviewAssignment, id=assignment_id)
-        user_id = request.user.id
 
-        is_enrolled = course.students.filter(id=user_id).exists()
+        is_enrolled = course.students.filter(id=request.user.id).exists()
         if not is_enrolled:
             messages.error(request, _('You are not enrolled in this course'))
             return HttpResponseRedirect(reverse('course_overview', args=[course_slug]))
@@ -63,23 +62,47 @@ class CourseReviewAssign(View):
             messages.error(request, _('The selected peer review assignment is not part of this course.'))
             return HttpResponseRedirect(reverse('course_reviews', args=[course_slug]))
 
-        collection = get_db().get_collection('peer_review_submissions')
+        self.collection = get_db().get_collection('peer_review_submissions')
 
-        submission = collection.find({
-            'kq': assignment.kq.id,
-            'assigned_to': user_id
-        })
+        submission = self.get_assigned_submissions(assignment.kq, request.user)
+
         if submission.count() > 0:
             messages.error(request, _('You already have a submission assigned.'))
             return HttpResponseRedirect(reverse('course_reviews', args=[course_slug]))
 
-        max_hours_assigned = timedelta(hours=getattr(settings,
-                                       "PEER_REVIEW_ASSIGNATION_EXPIRE", 24))
+        submission = self.get_available_submission(assignment.kq, request.user)
 
+        if submission.count() == 0:
+            messages.error(request, _('There is no submission avaliable for you at this moment. Please, try again later.'))
+            return HttpResponseRedirect(reverse('course_reviews', args=[course_slug]))
+        else:
+            self.assign_submission(submission[0], request.user)
+            return HttpResponseRedirect(reverse('course_review_review', args=[course_slug, assignment_id]))
+
+    def assign_submission(self, submission, user):
+        self.collection.update({
+            '_id': submission['_id']
+        }, {
+            '$set': {
+                'assigned_to': user.id,
+                'assigned_when': datetime.utcnow()
+            }
+        })
+
+    def get_assigned_submissions(self, kq, user):
+        return self.collection.find({
+            'kq': kq.id,
+            'assigned_to': user.id
+        })
+
+    def get_available_submission(self, kq, user):
+        max_hours_assigned = timedelta(
+            hours=getattr(settings, "PEER_REVIEW_ASSIGNATION_EXPIRE", 24)
+        )
         assignation_expire = datetime.utcnow() - max_hours_assigned
 
-        submission = collection.find({
-            'kq': assignment.kq.id,
+        return self.collection.find({
+            'kq': kq.id,
             '$or': [
                 {
                     'assigned_to': {
@@ -93,29 +116,15 @@ class CourseReviewAssign(View):
                 }
             ],
             'author': {
-                '$ne': user_id
+                '$ne': user.id
             },
             'reviewers': {
-                '$ne': user_id
+                '$ne': user.id
             }
         }).sort([
             ('reviews', pymongo.ASCENDING),
             ('author_reviews', pymongo.DESCENDING),
         ]).limit(1)
-
-        if submission.count() == 0:
-            messages.error(request, _('There is no submission avaliable for you at this moment. Please, try again later.'))
-            return HttpResponseRedirect(reverse('course_reviews', args=[course_slug]))
-        else:
-            collection.update({
-                '_id': submission[0]['_id']
-            }, {
-                '$set': {
-                    'assigned_to': user_id,
-                    'assigned_when': datetime.utcnow()
-                }
-            })
-            return HttpResponseRedirect(reverse('course_review_review', args=[course_slug, assignment_id]))
 
     @method_decorator(login_required)
     def dispatch(self, *args, **kwargs):
@@ -163,14 +172,12 @@ class CourseReview(View):
     def dispatch(self, *args, **kwargs):
         return super(CourseReview, self).dispatch(*args, **kwargs)
 
-# TODO: Need refactor, a lot of duplication code between post and get
 class CourseReviewReview(View):
     def get(self, request, course_slug, assignment_id):
         course = get_object_or_404(Course, slug=course_slug)
         assignment = get_object_or_404(PeerReviewAssignment, id=assignment_id)
-        user_id = request.user.id
 
-        is_enrolled = course.students.filter(id=user_id).exists()
+        is_enrolled = course.students.filter(id=request.user.id).exists()
         if not is_enrolled:
             messages.error(request, _('You are not enrolled in this course'))
             return HttpResponseRedirect(reverse('course_overview', args=[course_slug]))
@@ -183,7 +190,7 @@ class CourseReviewReview(View):
 
         submission = collection.find({
             'kq': assignment.kq.id,
-            'assigned_to': user_id
+            'assigned_to': request.user.id
         })
 
         if submission.count() == 0:
@@ -223,9 +230,8 @@ class CourseReviewReview(View):
     def post(self, request, course_slug, assignment_id):
         course = get_object_or_404(Course, slug=course_slug)
         assignment = get_object_or_404(PeerReviewAssignment, id=assignment_id)
-        user_id = request.user.id
 
-        is_enrolled = course.students.filter(id=user_id).exists()
+        is_enrolled = course.students.filter(id=request.user.id).exists()
         if not is_enrolled:
             messages.error(request, _('You are not enrolled in this course'))
             return HttpResponseRedirect(reverse('course_overview', args=[course_slug]))
@@ -238,7 +244,7 @@ class CourseReviewReview(View):
 
         submission = collection.find({
             'kq': assignment.kq.id,
-            'assigned_to': user_id
+            'assigned_to': request.user.id
         })
 
         if submission.count() == 0:
@@ -261,7 +267,7 @@ class CourseReviewReview(View):
 
                 reviews = get_db().get_collection('peer_review_reviews')
                 reviewed_count = reviews.find({
-                    'reviewer': user_id,
+                    'reviewer': request.user.id,
                     'kq': assignment.kq.id
                 }).count()
                 on_peerreviewreview_created_task.apply_async(
@@ -270,7 +276,7 @@ class CourseReviewReview(View):
                 )
 
                 current_site_name = get_current_site(request).name
-                send_mail_to_submission_owner(current_site_name, assignment, review, submitter)
+                self.send_mail_to_submission_owner(current_site_name, assignment, review, submitter)
             except IntegrityError:
                 messages.error(request, _('Your can\'t submit two times the same review.'))
                 return HttpResponseRedirect(reverse('course_reviews', args=[course_slug]))
@@ -302,34 +308,33 @@ class CourseReviewReview(View):
             'is_enrolled': is_enrolled,
         }, context_instance=RequestContext(request))
 
+    def send_mail_to_submission_owner(self, current_site_name, assignment, review, submitter):
+        subject = _(u'Your assignment "%(nugget)s" has been reviewed') % {'nugget': assignment.kq.title}
+        template = 'peerreview/email_review_submission.txt'
+        review_criteria = []
+        for item in review['criteria']:
+            try:
+                criterion = EvaluationCriterion.objects.get(pk=item[0]).title
+            except:
+                criterion = _(u'Undefined')
+
+            review_criteria.append((criterion, item[1]))
+
+        context = {
+            'user': submitter,
+            'date': review['created'].strftime('%d/%m/%Y'),
+            'nugget': assignment.kq.title,
+            'review_criteria': review_criteria,
+            'comment': review['comment'],
+            'site': current_site_name
+        }
+        to = [submitter.email]
+
+        send_mail_wrapper(subject, template, context, to)
+
     @method_decorator(login_required)
     def dispatch(self, *args, **kwargs):
         return super(CourseReviewReview, self).dispatch(*args, **kwargs)
-
-
-def send_mail_to_submission_owner(current_site_name, assignment, review, submitter):
-    subject = _(u'Your assignment "%(nugget)s" has been reviewed') % {'nugget': assignment.kq.title}
-    template = 'peerreview/email_review_submission.txt'
-    review_criteria = []
-    for item in review['criteria']:
-        try:
-            criterion = EvaluationCriterion.objects.get(pk=item[0]).title
-        except:
-            criterion = _(u'Undefined')
-
-        review_criteria.append((criterion, item[1]))
-
-    context = {
-        'user': submitter,
-        'date': review['created'].strftime('%d/%m/%Y'),
-        'nugget': assignment.kq.title,
-        'review_criteria': review_criteria,
-        'comment': review['comment'],
-        'site': current_site_name
-    }
-    to = [submitter.email]
-
-    send_mail_wrapper(subject, template, context, to)
 
 
 class GetS3UploadUrl(View):
@@ -362,11 +367,30 @@ class GetS3UploadUrl(View):
         return super(GetS3UploadUrl, self).dispatch(*args, **kwargs)
 
 
-class GetS3DownloadUrl(View):
+class BaseS3UtilView(View):
+    def s3_url(self, user_id, filename, kq_id):
+        conn = boto.connect_s3(settings.AWS_ACCESS_KEY_ID, settings.AWS_SECRET_ACCESS_KEY)
+        bucket = conn.get_bucket(settings.AWS_STORAGE_BUCKET_NAME)
+        k = boto.s3.key.Key(bucket)
+        name = "%d/%s/%s" % (user_id, kq_id, filename)
+        k.key = name
+        return k.generate_url(expires_in=0, query_auth=False)
+
+    def s3_upload(self, user_id, kq_id, filename, file_obj):
+        conn = boto.connect_s3(settings.AWS_ACCESS_KEY_ID, settings.AWS_SECRET_ACCESS_KEY)
+        bucket = conn.get_bucket(settings.AWS_STORAGE_BUCKET_NAME)
+        k = boto.s3.key.Key(bucket)
+        name = "%d/%s/%s" % (user_id, kq_id, filename)
+        k.key = name
+        k.set_contents_from_file(file_obj)
+        k.make_public()
+
+
+class GetS3DownloadUrl(BaseS3UtilView):
     def get(self, request):
         name = request.GET.get('name', 'noname')
         kq_id = request.GET.get('kq', 'nokq')
-        url = s3_url(request.user.id, name, kq_id)
+        url = self.s3_url(request.user.id, name, kq_id)
         return HttpResponse(urllib.quote(url))
 
     @method_decorator(login_required)
@@ -374,26 +398,7 @@ class GetS3DownloadUrl(View):
         return super(GetS3DownloadUrl, self).dispatch(*args, **kwargs)
 
 
-def s3_url(user_id, filename, kq_id):
-    conn = boto.connect_s3(settings.AWS_ACCESS_KEY_ID, settings.AWS_SECRET_ACCESS_KEY)
-    bucket = conn.get_bucket(settings.AWS_STORAGE_BUCKET_NAME)
-    k = boto.s3.key.Key(bucket)
-    name = "%d/%s/%s" % (user_id, kq_id, filename)
-    k.key = name
-    return k.generate_url(expires_in=0, query_auth=False)
-
-
-def s3_upload(user_id, kq_id, filename, file_obj):
-    conn = boto.connect_s3(settings.AWS_ACCESS_KEY_ID, settings.AWS_SECRET_ACCESS_KEY)
-    bucket = conn.get_bucket(settings.AWS_STORAGE_BUCKET_NAME)
-    k = boto.s3.key.Key(bucket)
-    name = "%d/%s/%s" % (user_id, kq_id, filename)
-    k.key = name
-    k.set_contents_from_file(file_obj)
-    k.make_public()
-
-
-class CourseReviewUpload(View):
+class CourseReviewUpload(BaseS3UtilView):
     def post(self, request, course_slug):
         course = get_object_or_404(Course, slug=course_slug)
 
@@ -411,8 +416,8 @@ class CourseReviewUpload(View):
             messages.error(request, _('Your text is greater than the max allowed size (%d characters).') % settings.PEER_REVIEW_TEXT_MAX_SIZE)
             return HttpResponseRedirect(reverse('course_classroom', args=[course_slug]) + "#unit%d/kq%d/p" % (unit.id, kq.id))
 
-        s3_upload(request.user.id, kq.id, file_to_upload.name, file_to_upload)
-        file_url = s3_url(request.user.id, file_to_upload.name, kq.id)
+        self.s3_upload(request.user.id, kq.id, file_to_upload.name, file_to_upload)
+        file_url = self.s3_url(request.user.id, file_to_upload.name, kq.id)
 
         submission = {
             "author": request.user.id,
